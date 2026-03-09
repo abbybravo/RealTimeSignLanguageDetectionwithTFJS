@@ -1,111 +1,231 @@
-// Import dependencies
-import React, { useRef, useState, useEffect } from "react";
-import * as tf from "@tensorflow/tfjs";
+// App.js
+
+import React, { useRef, useEffect, useState } from "react";
 import Webcam from "react-webcam";
 import "./App.css";
-import { nextFrame } from "@tensorflow/tfjs";
-// 2. TODO - Import drawing utility here
-// e.g. import { drawRect } from "./utilities";
-import {drawRect} from "./utilities"; 
+import { Hands } from "@mediapipe/hands";
+import { FaceMesh } from "@mediapipe/face_mesh";
 
 function App() {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
 
-  // Main function
-  const runCoco = async () => {
-    // 3. TODO - Load network 
-    // e.g. const net = await cocossd.load();
-    // https://tensorflowjsrealtimemodel.s3.au-syd.cloud-object-storage.appdomain.cloud/model.json
-    const net = await tf.loadGraphModel('https://tensorflowjsrealtimemodel.s3.au-syd.cloud-object-storage.appdomain.cloud/model.json')
-    
-    //  Loop and detect hands
-    setInterval(() => {
-      detect(net);
-    }, 16.7);
-  };
+  const [meme, setMeme] = useState(null);        // "thumb" | "peace" | "smile" | null
+  const [faceBox, setFaceBox] = useState(null);  // { xMin, xMax, yMin, yMax } in normalized coords
+  const memeImagesRef = useRef({});
 
-  const detect = async (net) => {
-    // Check data is available
-    if (
-      typeof webcamRef.current !== "undefined" &&
-      webcamRef.current !== null &&
-      webcamRef.current.video.readyState === 4
-    ) {
-      // Get Video Properties
-      const video = webcamRef.current.video;
-      const videoWidth = webcamRef.current.video.videoWidth;
-      const videoHeight = webcamRef.current.video.videoHeight;
+  // Preload meme images
+  useEffect(() => {
+    const imgs = {};
+    const load = (key, src) => {
+      const img = new Image();
+      img.src = src;
+      imgs[key] = img;
+    };
 
-      // Set video width
-      webcamRef.current.video.width = videoWidth;
-      webcamRef.current.video.height = videoHeight;
+    load("thumb", "/memes/thumb.png");
+    load("peace", "/memes/peace.png");
+    load("smile", "/memes/smile.png");
 
-      // Set canvas height and width
-      canvasRef.current.width = videoWidth;
-      canvasRef.current.height = videoHeight;
+    memeImagesRef.current = imgs;
+  }, []);
 
-      // 4. TODO - Make Detections
-      const img = tf.browser.fromPixels(video)
-      const resized = tf.image.resizeBilinear(img, [640,480])
-      const casted = resized.cast('int32')
-      const expanded = casted.expandDims(0)
-      const obj = await net.executeAsync(expanded)
-      console.log(obj)
+  // Gesture + face detection setup
+  useEffect(() => {
+    if (!webcamRef.current) return;
 
-      const boxes = await obj[1].array()
-      const classes = await obj[2].array()
-      const scores = await obj[4].array()
-      
-      // Draw mesh
-      const ctx = canvasRef.current.getContext("2d");
+    const hands = new Hands({
+      locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+    });
 
-      // 5. TODO - Update drawing utility
-      // drawSomething(obj, ctx)  
-      requestAnimationFrame(()=>{drawRect(boxes[0], classes[0], scores[0], 0.8, videoWidth, videoHeight, ctx)}); 
+    hands.setOptions({
+      maxNumHands: 1,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7,
+    });
 
-      tf.dispose(img)
-      tf.dispose(resized)
-      tf.dispose(casted)
-      tf.dispose(expanded)
-      tf.dispose(obj)
+    const faceMesh = new FaceMesh({
+      locateFile: (file) =>
+        `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`,
+    });
 
-    }
-  };
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7,
+    });
 
-  useEffect(()=>{runCoco()},[]);
+    const onHandsResults = (results) => {
+      if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0)
+        return;
+
+      const lm = results.multiHandLandmarks[0];
+
+      const thumbTip = lm[4];
+      const indexTip = lm[8];
+      const middleTip = lm[12];
+      const ringTip = lm[16];
+      const pinkyTip = lm[20];
+
+      // Very rough heuristics:
+
+      // 👍 thumbs up: thumb above index & middle, others lower
+      const isThumbsUp =
+        thumbTip.y < indexTip.y &&
+        thumbTip.y < middleTip.y &&
+        ringTip.y > indexTip.y &&
+        pinkyTip.y > indexTip.y;
+
+      // ✌️ peace: index & middle high, ring & pinky low
+      const isPeace =
+        indexTip.y < ringTip.y &&
+        middleTip.y < ringTip.y &&
+        ringTip.y > indexTip.y &&
+        pinkyTip.y > indexTip.y;
+
+      if (isThumbsUp) setMeme("thumb");
+      else if (isPeace) setMeme("peace");
+    };
+
+    const onFaceResults = (results) => {
+      if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0)
+        return;
+
+      const face = results.multiFaceLandmarks[0];
+
+      // Compute face bounding box in normalized coords
+      let xMin = 1,
+        xMax = 0,
+        yMin = 1,
+        yMax = 0;
+      face.forEach((p) => {
+        if (p.x < xMin) xMin = p.x;
+        if (p.x > xMax) xMax = p.x;
+        if (p.y < yMin) yMin = p.y;
+        if (p.y > yMax) yMax = p.y;
+      });
+      setFaceBox({ xMin, xMax, yMin, yMax });
+
+      // Smile detection: distance between mouth corners
+      const leftMouth = face[61];
+      const rightMouth = face[291];
+      const mouthWidth = Math.abs(rightMouth.x - leftMouth.x);
+
+      if (mouthWidth > 0.07) {
+        setMeme("smile");
+      }
+    };
+
+    hands.onResults(onHandsResults);
+    faceMesh.onResults(onFaceResults);
+
+    let detectId;
+    const detectLoop = async () => {
+      const video = webcamRef.current?.video;
+      if (video && video.readyState === 4) {
+        await hands.send({ image: video });
+        await faceMesh.send({ image: video });
+      }
+      detectId = requestAnimationFrame(detectLoop);
+    };
+
+    detectLoop();
+
+    return () => {
+      if (detectId) cancelAnimationFrame(detectId);
+      hands.close();
+      faceMesh.close();
+    };
+  }, []);
+
+  // Drawing loop: draw meme next to face
+  useEffect(() => {
+    let drawId;
+
+    const draw = () => {
+      const canvas = canvasRef.current;
+      const video = webcamRef.current?.video;
+      if (!canvas || !video || video.readyState !== 4) {
+        drawId = requestAnimationFrame(draw);
+        return;
+      }
+
+      const ctx = canvas.getContext("2d");
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+
+      // Full-screen canvas
+      canvas.width = vw;
+      canvas.height = vh;
+
+      ctx.clearRect(0, 0, vw, vh);
+
+      if (meme && faceBox && memeImagesRef.current[meme]) {
+        const img = memeImagesRef.current[meme];
+
+        const faceCenterX =
+          ((faceBox.xMin + faceBox.xMax) / 2) * vw;
+        const faceCenterY =
+          ((faceBox.yMin + faceBox.yMax) / 2) * vh;
+
+        const leftSpace = faceCenterX;
+        const rightSpace = vw - faceCenterX;
+
+        // Auto-scale meme to ~20% of screen width
+        const memeWidth = vw * 0.2;
+        const aspect =
+          img.width && img.height ? img.height / img.width : 1;
+        const memeHeight = memeWidth * aspect;
+
+        let x;
+        if (rightSpace >= leftSpace) {
+          x = faceCenterX + memeWidth * 0.2;
+        } else {
+          x = faceCenterX - memeWidth * 1.2;
+        }
+        const y = faceCenterY - memeHeight / 2;
+
+        ctx.drawImage(img, x, y, memeWidth, memeHeight);
+      }
+
+      drawId = requestAnimationFrame(draw);
+    };
+
+    draw();
+
+    return () => {
+      if (drawId) cancelAnimationFrame(drawId);
+    };
+  }, [meme, faceBox]);
 
   return (
     <div className="App">
       <header className="App-header">
         <Webcam
           ref={webcamRef}
-          muted={true} 
+          muted={true}
           style={{
             position: "absolute",
-            marginLeft: "auto",
-            marginRight: "auto",
             left: 0,
-            right: 0,
-            textAlign: "center",
-            zindex: 9,
-            width: 640,
-            height: 480,
+            top: 0,
+            width: "100vw",
+            height: "100vh",
+            objectFit: "cover",
+            zIndex: 1,
           }}
         />
-
         <canvas
           ref={canvasRef}
           style={{
             position: "absolute",
-            marginLeft: "auto",
-            marginRight: "auto",
             left: 0,
-            right: 0,
-            textAlign: "center",
-            zindex: 8,
-            width: 640,
-            height: 480,
+            top: 0,
+            width: "100vw",
+            height: "100vh",
+            zIndex: 2,
           }}
         />
       </header>
