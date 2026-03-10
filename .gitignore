@@ -1,0 +1,17 @@
+# Node modules
+node_modules/
+
+# Build output
+build/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Mac / Linux system files
+.DS_Store
+*.swp
+
+# Optional: ignore old TensorFlow folder if you don't need it
+tensorflow/
